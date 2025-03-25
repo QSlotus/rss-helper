@@ -95,29 +95,62 @@ internal fun MessageChainBuilder.appendKeyValue(key: String, value: Any?) {
 
 @PublishedApi
 internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: Boolean): Message {
-    val head = buildMessageChain {
-        appendKeyValue("标题", title)
-        appendKeyValue("链接", link)
-        appendKeyValue("发布时间", published)
-        appendKeyValue("更新时间", updated.takeIf { it != published })
-        appendKeyValue("分类", categories.map { it.name })
-        appendKeyValue("作者", author)
-        appendKeyValue("种子", torrent)
+    // 提取纯文本内容，处理转发信息和链接
+    val cleanContent = (html?.toPlainText(subject) ?: text.orEmpty().toPlainText())
+        .replace(Regex("https?://\\S+"), "") // 移除所有URL
+        .replace(Regex("(?i)forwarded from ([^\n]+)"), "【Forwarded From $1】\n") // 格式化转发信息
+        .trim()
+
+    // 构建底部信息
+    val footer = buildMessageChain {
+        appendLine("\n------")
+        appendLine("源URL: ${link ?: "无"}")
+        appendLine("发布时间: ${published ?: "未知"}")
     }
 
-    val message = html?.toMessage(subject) ?: text.orEmpty().toPlainText()
+    // 组合完整消息
+    val fullMessage = cleanContent + footer
 
     return if (forward) {
         val second = last.orNow().toEpochSecond().toInt()
         buildForwardMessage(subject) {
-            subject.bot at second says head
-            subject.bot at second says message
-
+            subject.bot at second says fullMessage
             displayStrategy = toDisplayStrategy()
         }
     } else {
-        head + if (message.content.length <= limit) message else "内容过长".toPlainText()
+        if (fullMessage.content.length <= limit) fullMessage else "内容过长".toPlainText()
     }
+}
+
+@PublishedApi
+internal suspend fun Element.toPlainText(subject: Contact): String {
+    val visitor = object : NodeVisitor, MutableList<Node> by ArrayList() {
+        override fun head(node: Node, depth: Int) {
+            if (node is TextNode) add(node)
+        }
+
+        override fun tail(node: Node, depth: Int) {
+            if (node is Element && node.nodeName() != "a") add(node) // 跳过链接元素
+        }
+    }
+    NodeTraversor.traverse(visitor, this)
+
+    val builder = StringBuilder()
+    visitor.forEach { node ->
+        when (node) {
+            is TextNode -> {
+                val text = node.wholeText.removePrefix("\n\t").removeSuffix("\n")
+                // 处理转发信息格式
+                builder.append(text.replace(Regex("(?i)forwarded from ([^\n]+)"), "【Forwarded From $1】\n"))
+            }
+            is Element -> when (node.nodeName()) {
+                "br" -> builder.append("\n")
+                // 跳过图片和其他元素，只保留文本
+            }
+        }
+    }
+
+    return builder.toString().trim()
 }
 
 @PublishedApi
