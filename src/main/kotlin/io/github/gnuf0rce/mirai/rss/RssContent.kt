@@ -96,15 +96,29 @@ internal fun MessageChainBuilder.appendKeyValue(key: String, value: Any?) {
 @PublishedApi
 internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: Boolean): Message {
     // 处理内容（保留图片但移除正文中的链接）
-    val messageContent = html?.toCleanMessage(subject) ?: 
-        text.orEmpty().toString()
+    val messageContent = html?.let { it.toRichMessage(subject) } ?: 
+        text.orEmpty()
             .removeUrlsFromText() // 只移除纯文本中的URL
             .toPlainText()
 
     // 处理转发信息格式
-    val cleanContent = messageContent.toString()
-        .replace(Regex("(?i)forwarded from ([^\n]+)"), "【Forwarded From $1】\n")
-        .trim()
+    val cleanContent = when (messageContent) {
+        is MessageChain -> {
+            val textContent = messageContent.joinToString("") { 
+                if (it is PlainText) it.content else "" 
+            }.replace(Regex("(?i)forwarded from ([^\n]+)"), "【Forwarded From $1】\n")
+            buildMessageChain {
+                append(textContent.toPlainText())
+                // 保留非文本内容（如图片）
+                messageContent.filterNot { it is PlainText }.forEach { append(it) }
+            }
+        }
+        else -> {
+            messageContent.toString()
+                .replace(Regex("(?i)forwarded from ([^\n]+)"), "【Forwarded From $1】\n")
+                .toPlainText()
+        }
+    }
 
     // 构建底部信息
     val footer = buildMessageChain {
@@ -115,7 +129,10 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
 
     // 组合完整消息
     val fullMessage = buildMessageChain {
-        append(cleanContent.toPlainText())
+        when (cleanContent) {
+            is MessageChain -> append(cleanContent)
+            else -> append(cleanContent.toString().toPlainText())
+        }
         append(footer)
     }
 
@@ -131,7 +148,7 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
 }
 
 @PublishedApi
-internal suspend fun Element.toCleanMessage(subject: Contact): MessageChain {
+internal suspend fun Element.toRichMessage(subject: Contact): MessageChain {
     val visitor = object : NodeVisitor, MutableList<Node> by ArrayList() {
         override fun head(node: Node, depth: Int) {
             if (node is TextNode) add(node)
@@ -157,7 +174,12 @@ internal suspend fun Element.toCleanMessage(subject: Contact): MessageChain {
                 }
             }
             is Element -> when (node.nodeName()) {
-                "img" -> builder.append(node.image(subject)) // 保留图片
+                "img" -> try {
+                    builder.append(node.image(subject)) // 保留图片
+                } catch (e: Exception) {
+                    logger.warning({ "图片上传失败" }, e)
+                    builder.append("[图片]".toPlainText())
+                }
                 "a" -> {
                     // 对于链接，只保留文本内容，不保留链接
                     val linkText = node.text()
@@ -176,8 +198,8 @@ internal suspend fun Element.toCleanMessage(subject: Contact): MessageChain {
 
 // 新增扩展函数，只移除纯文本中的URL
 internal fun String.removeUrlsFromText(): String {
-    return this.replace(Regex("(?<!src=[\"']|href=[\"'])https?://\\S+"), "")
-        .replace(Regex("<a\\s+[^>]*href\\s*=\\s*[\"'][^\"']*[\"'][^>]*>(.*?)</a>"), "$1")
+    return this.replace(Regex("""(?<!src=["']|href=["'])(https?://\S+)"""), "")
+        .replace(Regex("""<a\s+[^>]*href\s*=\s*["'][^"']*["'][^>]*>(.*?)</a>"""), "$1")
 }
 
 @PublishedApi
