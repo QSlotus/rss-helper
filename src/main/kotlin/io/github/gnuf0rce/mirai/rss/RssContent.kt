@@ -97,12 +97,12 @@ internal fun MessageChainBuilder.appendKeyValue(key: String, value: Any?) {
 internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: Boolean): Message {
     // 处理内容（保留图片但移除正文中的链接）
     val messageContent = html?.toCleanMessage(subject) ?: 
-        text.orEmpty()
+        text.orEmpty().toString()
             .removeUrlsFromText() // 只移除纯文本中的URL
             .toPlainText()
 
     // 处理转发信息格式
-    val cleanContent = messageContent
+    val cleanContent = messageContent.toString()
         .replace(Regex("(?i)forwarded from ([^\n]+)"), "【Forwarded From $1】\n")
         .trim()
 
@@ -115,7 +115,7 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
 
     // 组合完整消息
     val fullMessage = buildMessageChain {
-        append(cleanContent)
+        append(cleanContent.toPlainText())
         append(footer)
     }
 
@@ -153,7 +153,7 @@ internal suspend fun Element.toCleanMessage(subject: Contact): MessageChain {
                 // 移除文本中的URL（但不影响图片URL）
                 text = text.removeUrlsFromText()
                 if (text.isNotBlank()) {
-                    builder.append(text)
+                    builder.append(text.toPlainText())
                 }
             }
             is Element -> when (node.nodeName()) {
@@ -162,10 +162,10 @@ internal suspend fun Element.toCleanMessage(subject: Contact): MessageChain {
                     // 对于链接，只保留文本内容，不保留链接
                     val linkText = node.text()
                     if (linkText.isNotBlank() && linkText != node.attr("href")) {
-                        builder.append(linkText)
+                        builder.append(linkText.toPlainText())
                     }
                 }
-                "br" -> builder.append("\n")
+                "br" -> builder.append("\n".toPlainText())
                 // 其他元素可以在这里添加处理逻辑
             }
         }
