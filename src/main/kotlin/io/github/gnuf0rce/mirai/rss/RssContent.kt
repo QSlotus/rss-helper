@@ -95,10 +95,15 @@ internal fun MessageChainBuilder.appendKeyValue(key: String, value: Any?) {
 
 @PublishedApi
 internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: Boolean): Message {
-    // 提取纯文本内容，处理转发信息和链接
-    val cleanContent = (html?.toPlainText(subject) ?: text.orEmpty().toPlainText())
-        .replace(Regex("https?://\\S+"), "") // 移除所有URL
-        .replace(Regex("(?i)forwarded from ([^\n]+)"), "【Forwarded From $1】\n") // 格式化转发信息
+    // 处理内容（保留图片但移除正文中的链接）
+    val messageContent = html?.toCleanMessage(subject) ?: 
+        text.orEmpty()
+            .removeUrlsFromText() // 只移除纯文本中的URL
+            .toPlainText()
+
+    // 处理转发信息格式
+    val cleanContent = messageContent
+        .replace(Regex("(?i)forwarded from ([^\n]+)"), "【Forwarded From $1】\n")
         .trim()
 
     // 构建底部信息
@@ -109,7 +114,10 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
     }
 
     // 组合完整消息
-    val fullMessage = cleanContent + footer
+    val fullMessage = buildMessageChain {
+        append(cleanContent)
+        append(footer)
+    }
 
     return if (forward) {
         val second = last.orNow().toEpochSecond().toInt()
@@ -123,34 +131,53 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
 }
 
 @PublishedApi
-internal suspend fun Element.toPlainText(subject: Contact): String {
+internal suspend fun Element.toCleanMessage(subject: Contact): MessageChain {
     val visitor = object : NodeVisitor, MutableList<Node> by ArrayList() {
         override fun head(node: Node, depth: Int) {
             if (node is TextNode) add(node)
         }
 
         override fun tail(node: Node, depth: Int) {
-            if (node is Element && node.nodeName() != "a") add(node) // 跳过链接元素
+            if (node is Element) add(node) // 保留所有元素，后面会特殊处理<a>标签
         }
     }
     NodeTraversor.traverse(visitor, this)
 
-    val builder = StringBuilder()
+    val builder = MessageChainBuilder()
     visitor.forEach { node ->
         when (node) {
             is TextNode -> {
-                val text = node.wholeText.removePrefix("\n\t").removeSuffix("\n")
+                var text = node.wholeText.removePrefix("\n\t").removeSuffix("\n")
                 // 处理转发信息格式
-                builder.append(text.replace(Regex("(?i)forwarded from ([^\n]+)"), "【Forwarded From $1】\n"))
+                text = text.replace(Regex("(?i)forwarded from ([^\n]+)"), "【Forwarded From $1】\n")
+                // 移除文本中的URL（但不影响图片URL）
+                text = text.removeUrlsFromText()
+                if (text.isNotBlank()) {
+                    builder.append(text)
+                }
             }
             is Element -> when (node.nodeName()) {
+                "img" -> builder.append(node.image(subject)) // 保留图片
+                "a" -> {
+                    // 对于链接，只保留文本内容，不保留链接
+                    val linkText = node.text()
+                    if (linkText.isNotBlank() && linkText != node.attr("href")) {
+                        builder.append(linkText)
+                    }
+                }
                 "br" -> builder.append("\n")
-                // 跳过图片和其他元素，只保留文本
+                // 其他元素可以在这里添加处理逻辑
             }
         }
     }
 
-    return builder.toString().trim()
+    return builder.build()
+}
+
+// 新增扩展函数，只移除纯文本中的URL
+internal fun String.removeUrlsFromText(): String {
+    return this.replace(Regex("(?<!src=[\"']|href=[\"'])https?://\\S+"), "")
+        .replace(Regex("<a\\s+[^>]*href\\s*=\\s*[\"'][^\"']*[\"'][^>]*>(.*?)</a>"), "$1")
 }
 
 @PublishedApi
