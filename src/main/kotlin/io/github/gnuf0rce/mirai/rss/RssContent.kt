@@ -95,31 +95,38 @@ internal fun MessageChainBuilder.appendKeyValue(key: String, value: Any?) {
 
 @PublishedApi
 internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: Boolean): Message {
-    // 1. 提取转发来源（从HTML或纯文本中提取）
-    val forwardedSource = html?.extractForwardedSource()?.takeIf { it.isNotBlank() }
+    // 1. 提取转发来源（精确提取，不包含多余内容）
+    val forwardedSource = html?.extractCleanForwardedSource()?.takeIf { it.isNotBlank() }
         ?: text.orEmpty().extractForwardedFromText()
 
-    // 2. 处理正文内容（保留原始图片处理逻辑）
-    val messageContent = html?.let { 
+    // 2. 处理正文内容（完全保留原始结构，仅移除转发信息块）
+    val messageContent = html?.let {
         if (forwardedSource != null) {
-            // 当存在转发信息时，移除转发信息块
             it.toRichMessage(subject, removeForwardedBlock = true)
         } else {
             it.toRichMessage(subject)
         }
-    } ?: text.orEmpty()
-        .removeStandaloneUrls()
-        .toPlainText()
+    } ?: run {
+        // 纯文本处理：移除转发声明和多余URL
+        val cleanText = text.orEmpty()
+            .removeForwardedDeclaration()
+            .removeStandaloneUrls()
+            .trim()
+        cleanText.toPlainText()
+    }
 
-    // 3. 构建消息结构
+    // 3. 构建消息结构（确保格式正确）
     val messageBuilder = buildMessageChain {
-        // 3.1 添加格式化转发来源（如果存在）
-        forwardedSource?.let { append("【Forwarded From $it】\n".toPlainText()) }
+        // 3.1 添加格式化转发来源（带换行和方框）
+        forwardedSource?.let { 
+            append("【Forwarded From $it】".toPlainText())
+            append("\n") // 确保换行
+        }
 
         // 3.2 添加正文内容（已处理转发信息块）
         append(messageContent)
 
-        // 3.3 始终添加底部信息
+        // 3.3 添加底部信息（带前后换行）
         append("\n------\n".toPlainText())
         append("源URL: ${link ?: "无"}\n".toPlainText())
         append("发布时间: ${published ?: "未知"}".toPlainText())
@@ -140,10 +147,10 @@ internal suspend fun Element.toRichMessage(
     subject: Contact,
     removeForwardedBlock: Boolean = false
 ): MessageChain {
-    // 1. 预处理（如果需要移除转发信息块）
+    // 1. 预处理（精确移除转发信息块）
     val contentRoot = if (removeForwardedBlock) {
         clone().apply {
-            // 精确匹配转发信息块（包含嵌套结构）
+            // 精确匹配转发信息块（包括所有嵌套结构）
             select("""
                 p:has(> b:has(> a:contains(Forwarded From))),
                 p:has(> b:has(> a:contains(转发自)))
@@ -153,70 +160,60 @@ internal suspend fun Element.toRichMessage(
         this
     }
 
-    // 2. 使用原始可靠的节点遍历逻辑
-    val visitor = object : NodeVisitor, MutableList<Node> by ArrayList() {
-        override fun head(node: Node, depth: Int) {
-            if (node is TextNode) add(node)
-        }
-        override fun tail(node: Node, depth: Int) {
-            if (node is Element) add(node)
-        }
-    }
-    NodeTraversor.traverse(visitor, contentRoot)
-
-    // 3. 构建消息链（保持原始图片处理逻辑）
+    // 2. 使用原始节点处理逻辑（确保图片等功能正常）
     val builder = MessageChainBuilder()
-    visitor.forEach { node ->
-        when (node) {
-            is TextNode -> {
-                val text = node.wholeText
-                    .removePrefix("\n\t")
-                    .removeSuffix("\n")
-                    .removeStandaloneUrls()
-                if (text.isNotBlank()) {
-                    builder.append(text.toPlainText())
+    val nodeVisitor = object : NodeVisitor {
+        override fun head(node: Node, depth: Int) {
+            when (node) {
+                is TextNode -> {
+                    val text = node.wholeText
+                        .trimIndent()
+                        .replace(Regex("""\s+"""), " ")
+                    if (text.isNotBlank()) {
+                        builder.append(text.toPlainText())
+                    }
                 }
-            }
-            is Element -> when (node.nodeName()) {
-                "img" -> try {
-                    builder.append(node.image(subject)) // 原始图片上传逻辑
-                } catch (e: Exception) {
-                    logger.warning({ "图片上传失败: ${node.attr("src")}" }, e)
-                    builder.append("[图片]".toPlainText())
+                is Element -> when (node.nodeName()) {
+                    "img" -> try {
+                        builder.append(node.image(subject)) // 保持原始图片上传逻辑
+                    } catch (e: Exception) {
+                        logger.warning({ "图片上传失败: ${node.attr("src")}" }, e)
+                        builder.append("[图片]".toPlainText())
+                    }
+                    "br" -> builder.append("\n".toPlainText())
+                    "a" -> node.text().takeIf { it.isNotBlank() }?.let {
+                        builder.append(it.toPlainText())
+                    }
                 }
-                "br" -> builder.append("\n".toPlainText())
-                "a" -> node.text().takeIf { it.isNotBlank() }?.let {
-                    builder.append(it.toPlainText())
-                }
-                // 其他标签按原始逻辑处理
             }
         }
+        override fun tail(node: Node, depth: Int) = Unit
     }
+    NodeTraversor.traverse(nodeVisitor, contentRoot)
+
     return builder.build()
 }
 
-// region 辅助扩展函数
-private fun Element.extractForwardedSource(): String? {
+// region 改进的辅助函数
+private fun Element.extractCleanForwardedSource(): String? {
     return select("""
         p > b > a:contains(Forwarded From),
         p > b > a:contains(转发自)
     """.trimIndent())
         .firstOrNull()
         ?.text()
+        ?.replace(Regex("""\s+"""), " ") // 合并多余空格
         ?.trim()
         ?.takeIf { it.isNotBlank() }
 }
 
-private fun String.extractForwardedFromText(): String? {
-    return Regex("""(?:Forwarded From|转发自)[:\s]*([^\n]+)""", RegexOption.IGNORE_CASE)
-        .find(this)
-        ?.groupValues
-        ?.get(1)
-        ?.trim()
+private fun String.removeForwardedDeclaration(): String {
+    return replace(Regex("""(?:Forwarded From|转发自)[^\n]*[\n]?"""), "")
+        .trim()
 }
 
 private fun String.removeStandaloneUrls(): String {
-    return replace(Regex("""(^|\s)(https?://\S+)($|\s)"""), "$1$3")
+    return replace(Regex("""(^|\s)(https?://\S+)($|\s)"""), " ")
         .replace(Regex("""<a\b[^>]*>(.*?)</a>"""), "$1")
         .trim()
 }
