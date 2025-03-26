@@ -95,22 +95,23 @@ internal fun MessageChainBuilder.appendKeyValue(key: String, value: Any?) {
 
 @PublishedApi
 internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: Boolean): Message {
-    // 1. 提取转发来源但不显示在正文
-    val forwardedSource = html?.extractForwardedSourceNameOnly()
+    // 1. 提取转发来源
+    val forwardedSource = html?.extractCleanForwardSource() 
+        ?: text.orEmpty().extractForwardedFromText()
 
-    // 2. 处理正文内容（完全移除转发声明）
+    // 2. 处理正文内容（彻底移除转发声明）
     val messageContent = html?.let {
-        it.toCompleteMessage(subject, removeForwarded = true)
+        it.toCleanMessage(subject, removeForwarded = true)
     } ?: text.orEmpty()
         .removeForwardedDeclaration()
         .toPlainText()
 
-    // 3. 构建最终消息
+    // 3. 构建消息
     val messageBuilder = buildMessageChain {
-        // 3.1 添加正文内容（已移除转发声明）
+        // 3.1 添加正文（已完全清理转发声明）
         append(messageContent)
 
-        // 3.2 添加底部信息（包含转发来源）
+        // 3.2 添加底部信息
         append("\n------\n".toPlainText())
         append("源URL: ${link ?: "无"}\n".toPlainText())
         append("发布时间: ${published ?: "未知"}".toPlainText())
@@ -130,16 +131,14 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
 }
 
 @PublishedApi
-internal suspend fun Element.toCompleteMessage(
+internal suspend fun Element.toCleanMessage(
     subject: Contact,
     removeForwarded: Boolean = false
 ): MessageChain {
     val contentRoot = if (removeForwarded) {
         clone().apply {
-            select("""
-                p:has(> b:has(> a:contains(Forwarded From))),
-                p:has(> b:has(> a:contains(转发自)))
-            """.trimIndent()).remove()
+            // 彻底移除所有包含转发声明的元素
+            select(":contains(Forwarded From), :contains(转发自)").remove()
         }
     } else {
         this
@@ -152,7 +151,7 @@ internal suspend fun Element.toCompleteMessage(
         when (node) {
             is TextNode -> {
                 val text = node.text()
-                    .replace(Regex("""https?://\S+"""), "")
+                    .removeForwardedDeclaration()
                     .trim()
                 if (text.isNotBlank()) {
                     builder.append(text.toPlainText())
@@ -167,9 +166,9 @@ internal suspend fun Element.toCompleteMessage(
                 }
                 "br" -> builder.append("\n".toPlainText())
                 "a" -> {
-                    val linkText = node.text().trim()
-                    if (linkText.isNotBlank()) {
-                        builder.append(linkText.toPlainText())
+                    val text = node.text().trim()
+                    if (text.isNotBlank() && text != node.attr("href")) {
+                        builder.append(text.toPlainText())
                     }
                 }
                 else -> node.childNodes().forEach { processNode(it) }
@@ -177,27 +176,30 @@ internal suspend fun Element.toCompleteMessage(
         }
     }
 
-    contentRoot.childNodes().forEach { node ->
-        processNode(node)
-    }
-    
+    contentRoot.childNodes().forEach { processNode(it) }
     return builder.build()
 }
 
 // region 辅助函数
-private fun Element.extractForwardedSourceNameOnly(): String? {
-    return select("""
-        p > b > a:contains(Forwarded From),
-        p > b > a:contains(转发自)
-    """.trimIndent())
+private fun Element.extractCleanForwardSource(): String? {
+    return select("a:contains(Forwarded From), a:contains(转发自)")
         .firstOrNull()
         ?.text()
+        ?.replace(Regex("""(Forwarded From|转发自)"""), "")
         ?.trim()
         ?.takeIf { it.isNotBlank() }
 }
 
+private fun String.extractForwardedFromText(): String? {
+    return Regex("""(?:Forwarded From|转发自)[:\s]*(.+)""")
+        .find(this)
+        ?.groupValues
+        ?.get(1)
+        ?.trim()
+}
+
 private fun String.removeForwardedDeclaration(): String {
-    return replace(Regex("""(?:Forwarded From|转发自)[^\n]*"""), "")
+    return replace(Regex("""(Forwarded From|转发自).*"""), "")
         .trim()
 }
 // endregion
