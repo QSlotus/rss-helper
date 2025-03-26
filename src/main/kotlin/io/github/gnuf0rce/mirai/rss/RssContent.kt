@@ -95,34 +95,24 @@ internal fun MessageChainBuilder.appendKeyValue(key: String, value: Any?) {
 
 @PublishedApi
 internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: Boolean): Message {
-    // 1. 提取转发来源
-    val forwardedSource = html?.extractCleanForwardedSource()?.takeIf { it.isNotBlank() }
-        ?: text.orEmpty().let { extractForwardedFromText(it) }
+    // 1. 提取转发来源（仅提取名称部分）
+    val forwardedSource = html?.extractForwardedSourceNameOnly()
 
-    // 2. 处理正文内容
-    val messageContent = html?.let { element ->
-        if (forwardedSource != null) {
-            element.toRichMessage(subject, removeForwardedBlock = true)
-        } else {
-            element.toRichMessage(subject)
-        }
-    } ?: run {
-        text.orEmpty()
-            .removeForwardedDeclaration()
-            .removeStandaloneUrls()
-            .trim()
-            .toPlainText()
-    }
+    // 2. 处理正文内容（不再移除任何块，仅做格式化）
+    val messageContent = html?.toRichMessageKeepAll(subject) 
+        ?: text.orEmpty().toPlainText()
 
     // 3. 构建消息结构
     val messageBuilder = buildMessageChain {
-        forwardedSource?.let { source ->
-            append("【Forwarded From $source】".toPlainText())
-            append("\n")
+        // 3.1 添加格式化转发来源（如果存在）
+        forwardedSource?.let { 
+            append("【Forwarded From $it】\n".toPlainText()) 
         }
 
+        // 3.2 添加完整正文内容
         append(messageContent)
 
+        // 3.3 添加底部信息
         append("\n------\n".toPlainText())
         append("源URL: ${link ?: "无"}\n".toPlainText())
         append("发布时间: ${published ?: "未知"}".toPlainText())
@@ -139,80 +129,53 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
 }
 
 @PublishedApi
-internal suspend fun Element.toRichMessage(
-    subject: Contact,
-    removeForwardedBlock: Boolean = false
-): MessageChain {
-    val contentRoot = if (removeForwardedBlock) {
-        clone().apply {
-            select("""
-                p:has(> b:has(> a:contains(Forwarded From))),
-                p:has(> b:has(> a:contains(转发自)))
-            """.trimIndent()).remove()
-        }
-    } else {
-        this
-    }
-
-    return MessageChainBuilder().apply {
-        suspend fun processNode(node: Node) {
-            when (node) {
-                is TextNode -> {
-                    val text = node.wholeText
-                        .trimIndent()
-                        .replace(Regex("""\s+"""), " ")
-                    if (text.isNotBlank()) {
-                        append(text.toPlainText())
-                    }
+internal suspend fun Element.toRichMessageKeepAll(subject: Contact): MessageChain {
+    val builder = MessageChainBuilder()
+    
+    // 遍历所有子节点但不移除任何内容
+    childNodes().forEach { node ->
+        when (node) {
+            is TextNode -> {
+                node.wholeText
+                    .trim()
+                    .takeIf { it.isNotBlank() }
+                    ?.let { builder.append(it.toPlainText()) }
+            }
+            is Element -> when (node.nodeName()) {
+                "img" -> try {
+                    builder.append(node.image(subject))
+                } catch (e: Exception) {
+                    logger.warning({ "图片上传失败: ${node.attr("src")}" }, e)
+                    builder.append("[图片]".toPlainText())
                 }
-                is Element -> when (node.nodeName()) {
-                    "img" -> try {
-                        append(node.image(subject))
-                    } catch (e: Exception) {
-                        logger.warning({ "图片上传失败: ${node.attr("src")}" }, e)
-                        append("[图片]".toPlainText())
-                    }
-                    "br" -> append("\n".toPlainText())
+                "br" -> builder.append("\n".toPlainText())
+                "a" -> {
+                    // 保留链接文本但移除URL
+                    val text = node.text().takeIf { it.isNotBlank() } 
+                        ?: node.attr("href")
+                    builder.append(text.toPlainText())
+                }
+                "b", "strong" -> {
+                    // 保留加粗文本
+                    builder.append(node.text().toPlainText())
                 }
             }
         }
-
-        contentRoot.childNodes().forEach { node ->
-            processNode(node)
-        }
-    }.build()
+    }
+    
+    return builder.build()
 }
 
 // region 辅助函数
-private fun Element.extractCleanForwardedSource(): String? {
+private fun Element.extractForwardedSourceNameOnly(): String? {
     return select("""
-        p > b > a:contains(Forwarded From),
-        p > b > a:contains(转发自)
+        p:contains(Forwarded From) a,
+        p:contains(转发自) a
     """.trimIndent())
         .firstOrNull()
         ?.text()
-        ?.replace(Regex("""\s+"""), " ")
         ?.trim()
         ?.takeIf { it.isNotBlank() }
-}
-
-private fun extractForwardedFromText(text: String): String? {
-    return Regex("""(?:Forwarded From|转发自)[:\s]*([^\n]+)""", RegexOption.IGNORE_CASE)
-        .find(text)
-        ?.groupValues
-        ?.get(1)
-        ?.trim()
-}
-
-private fun String.removeForwardedDeclaration(): String {
-    return replace(Regex("""(?:Forwarded From|转发自)[^\n]*[\n]?"""), "")
-        .trim()
-}
-
-private fun String.removeStandaloneUrls(): String {
-    return replace(Regex("""(^|\s)(https?://\S+)($|\s)"""), " ")
-        .replace(Regex("""<a\b[^>]*>(.*?)</a>"""), "$1")
-        .trim()
 }
 // endregion
 
