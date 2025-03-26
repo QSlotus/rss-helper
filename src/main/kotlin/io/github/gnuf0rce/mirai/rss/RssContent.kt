@@ -95,27 +95,28 @@ internal fun MessageChainBuilder.appendKeyValue(key: String, value: Any?) {
 
 @PublishedApi
 internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: Boolean): Message {
-    // 1. 提取转发来源
+    // 1. 提取转发来源但不显示在正文
     val forwardedSource = html?.extractForwardedSourceNameOnly()
 
-    // 2. 处理正文内容
+    // 2. 处理正文内容（完全移除转发声明）
     val messageContent = html?.let {
-        buildMessageChain {
-            // 先添加转发信息
-            forwardedSource?.let { source ->
-                append("【Forwarded From $source】\n".toPlainText())
-            }
-            // 添加完整HTML内容
-            append(it.toCompleteMessage(subject))
-        }
-    } ?: text.orEmpty().toPlainText()
+        it.toCompleteMessage(subject, removeForwarded = true)
+    } ?: text.orEmpty()
+        .removeForwardedDeclaration()
+        .toPlainText()
 
     // 3. 构建最终消息
     val messageBuilder = buildMessageChain {
+        // 3.1 添加正文内容（已移除转发声明）
         append(messageContent)
+
+        // 3.2 添加底部信息（包含转发来源）
         append("\n------\n".toPlainText())
         append("源URL: ${link ?: "无"}\n".toPlainText())
         append("发布时间: ${published ?: "未知"}".toPlainText())
+        forwardedSource?.let {
+            append("\n从 $it 转发".toPlainText())
+        }
     }
 
     return if (forward) {
@@ -129,7 +130,21 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
 }
 
 @PublishedApi
-internal suspend fun Element.toCompleteMessage(subject: Contact): MessageChain {
+internal suspend fun Element.toCompleteMessage(
+    subject: Contact,
+    removeForwarded: Boolean = false
+): MessageChain {
+    val contentRoot = if (removeForwarded) {
+        clone().apply {
+            select("""
+                p:has(> b:has(> a:contains(Forwarded From))),
+                p:has(> b:has(> a:contains(转发自)))
+            """.trimIndent()).remove()
+        }
+    } else {
+        this
+    }
+
     val builder = MessageChainBuilder()
     
     // 递归处理节点的挂起函数
@@ -145,7 +160,7 @@ internal suspend fun Element.toCompleteMessage(subject: Contact): MessageChain {
             }
             is Element -> when (node.tagName()) {
                 "img" -> try {
-                    builder.append(node.image(subject)) // 现在在协程体内
+                    builder.append(node.image(subject))
                 } catch (e: Exception) {
                     logger.warning({ "图片上传失败: ${node.attr("src")}" }, e)
                     builder.append("[图片]".toPlainText())
@@ -162,21 +177,28 @@ internal suspend fun Element.toCompleteMessage(subject: Contact): MessageChain {
         }
     }
 
-    // 处理所有子节点
-    childNodes().forEach { node ->
-        processNode(node) // 在协程上下文中调用
+    contentRoot.childNodes().forEach { node ->
+        processNode(node)
     }
     
     return builder.build()
 }
 
-// 辅助函数保持不变
+// region 辅助函数
 private fun Element.extractForwardedSourceNameOnly(): String? {
-    return select("p:contains(Forwarded From) a, p:contains(转发自) a")
+    return select("""
+        p > b > a:contains(Forwarded From),
+        p > b > a:contains(转发自)
+    """.trimIndent())
         .firstOrNull()
         ?.text()
         ?.trim()
         ?.takeIf { it.isNotBlank() }
+}
+
+private fun String.removeForwardedDeclaration(): String {
+    return replace(Regex("""(?:Forwarded From|转发自)[^\n]*"""), "")
+        .trim()
 }
 // endregion
 
