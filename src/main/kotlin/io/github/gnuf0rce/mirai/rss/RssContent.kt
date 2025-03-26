@@ -95,16 +95,17 @@ internal fun MessageChainBuilder.appendKeyValue(key: String, value: Any?) {
 
 @PublishedApi
 internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: Boolean): Message {
-    // 1. 提取转发来源
+    // 1. 提取转发来源（不修改原始HTML）
     val forwardedSource = html?.extractForwardedSource()?.takeIf { it.isNotBlank() }
         ?: text.orEmpty().extractForwardedFromText()
 
-    // 2. 处理正文内容
+    // 2. 处理正文内容（保留除转发信息外的所有内容）
     val (cleanContent, hasImages) = html?.let { 
-        val content = it.toRichMessage(subject, removeForwarded = true)
+        val content = it.toRichMessage(subject, keepForwardedContent = false)
         content to content.any { it is Image }
     } ?: run {
         val textContent = text.orEmpty()
+            .removeForwardedHeader() // 仅移除转发头
             .removeUrlsFromText()
             .toPlainText()
         textContent to false
@@ -112,10 +113,14 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
 
     // 3. 构建消息结构
     val messageBuilder = buildMessageChain {
+        // 添加转发来源头（如果存在）
         forwardedSource?.let { append("【Forwarded From $it】\n".toPlainText()) }
+        
+        // 添加正文内容（已自动排除转发信息）
         append(cleanContent)
         
-        if (!hasImages) {
+        // 添加元信息（图片消息不加分隔线）
+        if (!hasImages && cleanContent.isNotEmpty()) {
             append("\n------\n".toPlainText())
             append("源URL: ${link ?: "无"}\n".toPlainText())
             append("发布时间: ${published ?: "未知"}".toPlainText())
@@ -135,23 +140,23 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
 @PublishedApi
 internal suspend fun Element.toRichMessage(
     subject: Contact,
-    removeForwarded: Boolean = false
+    keepForwardedContent: Boolean = false
 ): MessageChain {
-    // 1. 预处理
-    val contentRoot = if (removeForwarded) {
-        clone().apply { 
-            select("p:contains(Forwarded From), p:contains(转发自)").remove() 
+    // 创建内容副本进行处理
+    val contentRoot = if (!keepForwardedContent) {
+        clone().apply {
+            // 只移除转发信息标签，保留其他所有内容
+            select("p:contains(Forwarded From), p:contains(转发自)").remove()
         }
     } else {
         this
     }
 
-    // 2. 使用MessageChainBuilder构建内容
     return MessageChainBuilder().apply {
-        contentRoot.children().forEach { node ->
-            when {
-                // 处理文本节点
-                node is TextNode -> {
+        // 遍历所有子节点（深度优先）
+        fun processNode(node: Node) {
+            when (node) {
+                is TextNode -> {
                     val text = node.wholeText
                         .trimIndent()
                         .replace(Regex("""\s+"""), " ")
@@ -160,22 +165,27 @@ internal suspend fun Element.toRichMessage(
                     }
                 }
                 
-                // 处理换行
-                node is Element && node.tagName() == "br" -> {
-                    append("\n".toPlainText())
-                }
-                
-                // 处理图片（在协程内调用挂起函数）
-                node is Element && node.tagName() == "img" -> {
-                    try {
-                        append(node.image(subject)) // 现在在协程作用域内
-                    } catch (e: Exception) {
-                        logger.warning({ "图片上传失败: ${node.attr("src")}" }, e)
-                        append("[图片]".toPlainText())
+                is Element -> {
+                    when (node.tagName()) {
+                        "br" -> append("\n".toPlainText())
+                        "img" -> {
+                            try {
+                                append(node.image(subject))
+                            } catch (e: Exception) {
+                                logger.warning({ "图片上传失败: ${node.attr("src")}" }, e)
+                                append("[图片]".toPlainText())
+                            }
+                        }
+                        else -> {
+                            // 递归处理子节点
+                            node.childNodes().forEach { processNode(it) }
+                        }
                     }
                 }
             }
         }
+
+        contentRoot.childNodes().forEach { processNode(it) }
     }.build().optimizeSpaces()
 }
 
@@ -196,15 +206,22 @@ private fun String.extractForwardedFromText(): String? {
         ?.trim()
 }
 
+private fun String.removeForwardedHeader(): String {
+    return replace(Regex("""(?:Forwarded From|转发自)[^\n]*\n?""", RegexOption.IGNORE_CASE), "")
+}
+
 private fun String.removeUrlsFromText(): String {
     return replace(Regex("""https?://\S+"""), "")
         .replace(Regex("""<a\b[^>]*>(.*?)</a>"""), "$1")
 }
 
 private fun MessageChain.optimizeSpaces(): MessageChain {
-    return this.joinToString("") { it.content }
-        .replace(Regex("\n{3,}"), "\n\n")
-        .let { buildMessageChain { append(it.toPlainText()) } }
+    return buildMessageChain {
+        val content = this@optimizeSpaces.joinToString("") { it.content }
+            .replace(Regex("\n{3,}"), "\n\n")
+            .trim()
+        append(content.toPlainText())
+    }
 }
 // endregion
 
