@@ -104,12 +104,12 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
         text.orEmpty()
             .removeUrlsFromText()
             .toPlainText()
-            .replaceFirst(forwardedSource.orEmpty(), "") // 删除正文中的转发来源
+            .replaceFirst(forwardedSource.orEmpty() as String, "") // 明确指定为 String 类型
 
     // 3. 构建消息结构
     val messageBuilder = buildMessageChain {
         // 3.1 添加转发来源头（如果存在）
-        forwardedSource?.let { append("【Forwarded From $it】\n".toPlainText()) }
+        forwardedSource?.let { append("【Forwarded From $it】\n".toPlainText() as CharSequence) } // 明确指定为 CharSequence 类型
 
         // 3.2 添加正文内容（包含图片）
         append(messageContent)
