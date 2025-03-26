@@ -101,12 +101,12 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
             .removeUrlsFromText() // 只移除纯文本中的URL
             .toPlainText()
 
-    // 处理转发信息格式
+    // 处理转发信息格式（精确匹配forwarded from + 单个单词/下划线组合）
     val cleanContent = when (messageContent) {
         is MessageChain -> {
             val textContent = messageContent.joinToString("") { 
                 if (it is PlainText) it.content else "" 
-            }.replace(Regex("(?i)forwarded from ([^\n]+)"), "【Forwarded From $1】\n")
+            }.replace(Regex("(?i)(forwarded from )([\\w_]+)"), "【$1$2】")
             buildMessageChain {
                 append(textContent.toPlainText())
                 // 保留非文本内容（如图片）
@@ -115,7 +115,7 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
         }
         else -> {
             messageContent.toString()
-                .replace(Regex("(?i)forwarded from ([^\n]+)"), "【Forwarded From $1】\n")
+                .replace(Regex("(?i)(forwarded from )([\\w_]+)"), "【$1$2】")
                 .toPlainText()
         }
     }
@@ -155,7 +155,7 @@ internal suspend fun Element.toRichMessage(subject: Contact): MessageChain {
         }
 
         override fun tail(node: Node, depth: Int) {
-            if (node is Element) add(node) // 保留所有元素，后面会特殊处理<a>标签
+            if (node is Element) add(node) // 保留所有元素
         }
     }
     NodeTraversor.traverse(visitor, this)
@@ -165,9 +165,9 @@ internal suspend fun Element.toRichMessage(subject: Contact): MessageChain {
         when (node) {
             is TextNode -> {
                 var text = node.wholeText.removePrefix("\n\t").removeSuffix("\n")
-                // 处理转发信息格式
-                text = text.replace(Regex("(?i)forwarded from ([^\n]+)"), "【Forwarded From $1】\n")
-                // 移除文本中的URL（但不影响图片URL）
+                // 精确匹配forwarded from + 单个单词/下划线组合
+                text = text.replace(Regex("(?i)(forwarded from )([\\w_]+)"), "【$1$2】")
+                // 移除文本中的URL（保留图片URL）
                 text = text.removeUrlsFromText()
                 if (text.isNotBlank()) {
                     builder.append(text.toPlainText())
@@ -181,14 +181,14 @@ internal suspend fun Element.toRichMessage(subject: Contact): MessageChain {
                     builder.append("[图片]".toPlainText())
                 }
                 "a" -> {
-                    // 对于链接，只保留文本内容，不保留链接
+                    // 对于链接，只保留文本内容
                     val linkText = node.text()
                     if (linkText.isNotBlank() && linkText != node.attr("href")) {
                         builder.append(linkText.toPlainText())
                     }
                 }
                 "br" -> builder.append("\n".toPlainText())
-                // 其他元素可以在这里添加处理逻辑
+                // 其他元素处理...
             }
         }
     }
@@ -196,10 +196,10 @@ internal suspend fun Element.toRichMessage(subject: Contact): MessageChain {
     return builder.build()
 }
 
-// 新增扩展函数，只移除纯文本中的URL
+// 辅助扩展函数（保持不变）
 internal fun String.removeUrlsFromText(): String {
-    return this.replace(Regex("""(?<!src=["']|href=["'])(https?://\S+)"""), "")
-        .replace(Regex("""<a\s+[^>]*href\s*=\s*["'][^"']*["'][^>]*>(.*?)</a>"""), "$1")
+    return this.replace(Regex("(?<!src=[\"']|href=[\"'])https?://\\S+"), "")
+        .replace(Regex("<a\\s+[^>]*href\\s*=\\s*[\"'][^\"']*[\"'][^>]*>(.*?)</a>"), "$1")
 }
 
 @PublishedApi
