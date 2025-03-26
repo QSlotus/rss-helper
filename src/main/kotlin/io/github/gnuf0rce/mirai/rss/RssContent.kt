@@ -95,11 +95,11 @@ internal fun MessageChainBuilder.appendKeyValue(key: String, value: Any?) {
 
 @PublishedApi
 internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: Boolean): Message {
-    // 1. 提取转发来源（优先从HTML的<p>Forwarded From <a>格式提取）
+    // 1. 提取转发来源
     val forwardedSource = html?.extractForwardedSource()?.takeIf { it.isNotBlank() }
         ?: text.orEmpty().extractForwardedFromText()
 
-    // 2. 处理正文内容（保留图片、移除转发信息块和正文链接）
+    // 2. 处理正文内容
     val (cleanContent, hasImages) = html?.let { 
         val content = it.toRichMessage(subject, removeForwarded = true)
         content to content.any { it is Image }
@@ -112,13 +112,9 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
 
     // 3. 构建消息结构
     val messageBuilder = buildMessageChain {
-        // 3.1 添加转发来源头（如果存在）
         forwardedSource?.let { append("【Forwarded From $it】\n".toPlainText()) }
-
-        // 3.2 添加正文内容
         append(cleanContent)
-
-        // 3.3 添加分隔线和元信息（图片消息不加分隔线）
+        
         if (!hasImages) {
             append("\n------\n".toPlainText())
             append("源URL: ${link ?: "无"}\n".toPlainText())
@@ -141,7 +137,7 @@ internal suspend fun Element.toRichMessage(
     subject: Contact,
     removeForwarded: Boolean = false
 ): MessageChain {
-    // 1. 预处理（移除转发信息块）
+    // 1. 预处理
     val contentRoot = if (removeForwarded) {
         clone().apply { 
             select("p:contains(Forwarded From), p:contains(转发自)").remove() 
@@ -150,47 +146,37 @@ internal suspend fun Element.toRichMessage(
         this
     }
 
-    // 2. 遍历所有节点
-    val builder = MessageChainBuilder()
-    val nodeVisitor = object : NodeVisitor {
-        override fun head(node: Node, depth: Int) {
+    // 2. 使用MessageChainBuilder构建内容
+    return MessageChainBuilder().apply {
+        contentRoot.children().forEach { node ->
             when {
-                // 2.1 处理文本节点
+                // 处理文本节点
                 node is TextNode -> {
                     val text = node.wholeText
                         .trimIndent()
                         .replace(Regex("""\s+"""), " ")
                     if (text.isNotBlank()) {
-                        builder.append(text.toPlainText())
+                        append(text.toPlainText())
                     }
                 }
                 
-                // 2.2 处理换行
+                // 处理换行
                 node is Element && node.tagName() == "br" -> {
-                    builder.append("\n".toPlainText())
+                    append("\n".toPlainText())
                 }
                 
-                // 2.3 处理图片
+                // 处理图片（在协程内调用挂起函数）
                 node is Element && node.tagName() == "img" -> {
                     try {
-                        builder.append(node.image(subject))
+                        append(node.image(subject)) // 现在在协程作用域内
                     } catch (e: Exception) {
                         logger.warning({ "图片上传失败: ${node.attr("src")}" }, e)
-                        builder.append("[图片]".toPlainText())
+                        append("[图片]".toPlainText())
                     }
                 }
             }
         }
-
-        override fun tail(node: Node, depth: Int) = Unit
-    }
-    NodeTraversor.traverse(nodeVisitor, contentRoot)
-
-    // 3. 后处理（合并相邻文本、移除多余空行）
-    return builder.build()
-        .joinToString("") { it.content }
-        .replace(Regex("\n{3,}"), "\n\n")
-        .toMessageChain()
+    }.build().optimizeSpaces()
 }
 
 // region 辅助扩展函数
@@ -198,6 +184,7 @@ private fun Element.extractForwardedSource(): String? {
     return select("p:contains(Forwarded From) a, p:contains(转发自) a")
         .firstOrNull()
         ?.text()
+        ?.trim()
         ?.takeIf { it.isNotBlank() }
 }
 
@@ -212,6 +199,12 @@ private fun String.extractForwardedFromText(): String? {
 private fun String.removeUrlsFromText(): String {
     return replace(Regex("""https?://\S+"""), "")
         .replace(Regex("""<a\b[^>]*>(.*?)</a>"""), "$1")
+}
+
+private fun MessageChain.optimizeSpaces(): MessageChain {
+    return this.joinToString("") { it.content }
+        .replace(Regex("\n{3,}"), "\n\n")
+        .let { buildMessageChain { append(it.toPlainText()) } }
 }
 // endregion
 
