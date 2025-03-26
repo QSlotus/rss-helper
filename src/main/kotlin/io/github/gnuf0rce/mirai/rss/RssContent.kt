@@ -98,10 +98,10 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
     // 1. 提取转发来源
     val forwardedSource = html?.extractForwardedSourceNameOnly()
 
-    // 2. 处理正文内容（使用深度遍历确保不丢失任何内容）
+    // 2. 处理正文内容
     val messageContent = html?.let {
         buildMessageChain {
-            // 先添加转发信息（如果存在）
+            // 先添加转发信息
             forwardedSource?.let { source ->
                 append("【Forwarded From $source】\n".toPlainText())
             }
@@ -132,10 +132,10 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
 internal suspend fun Element.toCompleteMessage(subject: Contact): MessageChain {
     val builder = MessageChainBuilder()
     
-    fun processNode(node: Node) {
+    // 递归处理节点的挂起函数
+    suspend fun processNode(node: Node) {
         when (node) {
             is TextNode -> {
-                // 处理纯文本中的URL（移除）
                 val text = node.text()
                     .replace(Regex("""https?://\S+"""), "")
                     .trim()
@@ -145,38 +145,34 @@ internal suspend fun Element.toCompleteMessage(subject: Contact): MessageChain {
             }
             is Element -> when (node.tagName()) {
                 "img" -> try {
-                    builder.append(node.image(subject))
+                    builder.append(node.image(subject)) // 现在在协程体内
                 } catch (e: Exception) {
                     logger.warning({ "图片上传失败: ${node.attr("src")}" }, e)
                     builder.append("[图片]".toPlainText())
                 }
                 "br" -> builder.append("\n".toPlainText())
                 "a" -> {
-                    // 只保留链接文本，移除URL和<a>标签
                     val linkText = node.text().trim()
                     if (linkText.isNotBlank()) {
                         builder.append(linkText.toPlainText())
                     }
-                }
-                "b", "strong", "p" -> {
-                    // 处理嵌套内容
-                    node.childNodes().forEach { processNode(it) }
                 }
                 else -> node.childNodes().forEach { processNode(it) }
             }
         }
     }
 
-    childNodes().forEach { processNode(it) }
+    // 处理所有子节点
+    childNodes().forEach { node ->
+        processNode(node) // 在协程上下文中调用
+    }
+    
     return builder.build()
 }
 
 // 辅助函数保持不变
 private fun Element.extractForwardedSourceNameOnly(): String? {
-    return select("""
-        p:contains(Forwarded From) a,
-        p:contains(转发自) a
-    """.trimIndent())
+    return select("p:contains(Forwarded From) a, p:contains(转发自) a")
         .firstOrNull()
         ?.text()
         ?.trim()
