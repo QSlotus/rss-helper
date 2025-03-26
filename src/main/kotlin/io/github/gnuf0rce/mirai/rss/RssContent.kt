@@ -95,38 +95,34 @@ internal fun MessageChainBuilder.appendKeyValue(key: String, value: Any?) {
 
 @PublishedApi
 internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: Boolean): Message {
-    // 1. 提取转发来源（精确提取，不包含多余内容）
+    // 1. 提取转发来源
     val forwardedSource = html?.extractCleanForwardedSource()?.takeIf { it.isNotBlank() }
-        ?: text.orEmpty().extractForwardedFromText()
+        ?: text.orEmpty().let { extractForwardedFromText(it) }
 
-    // 2. 处理正文内容（完全保留原始结构，仅移除转发信息块）
-    val messageContent = html?.let {
+    // 2. 处理正文内容
+    val messageContent = html?.let { element ->
         if (forwardedSource != null) {
-            it.toRichMessage(subject, removeForwardedBlock = true)
+            element.toRichMessage(subject, removeForwardedBlock = true)
         } else {
-            it.toRichMessage(subject)
+            element.toRichMessage(subject)
         }
     } ?: run {
-        // 纯文本处理：移除转发声明和多余URL
-        val cleanText = text.orEmpty()
+        text.orEmpty()
             .removeForwardedDeclaration()
             .removeStandaloneUrls()
             .trim()
-        cleanText.toPlainText()
+            .toPlainText()
     }
 
-    // 3. 构建消息结构（确保格式正确）
+    // 3. 构建消息结构
     val messageBuilder = buildMessageChain {
-        // 3.1 添加格式化转发来源（带换行和方框）
-        forwardedSource?.let { 
-            append("【Forwarded From $it】".toPlainText())
-            append("\n") // 确保换行
+        forwardedSource?.let { source ->
+            append("【Forwarded From $source】".toPlainText())
+            append("\n")
         }
 
-        // 3.2 添加正文内容（已处理转发信息块）
         append(messageContent)
 
-        // 3.3 添加底部信息（带前后换行）
         append("\n------\n".toPlainText())
         append("源URL: ${link ?: "无"}\n".toPlainText())
         append("发布时间: ${published ?: "未知"}".toPlainText())
@@ -147,10 +143,8 @@ internal suspend fun Element.toRichMessage(
     subject: Contact,
     removeForwardedBlock: Boolean = false
 ): MessageChain {
-    // 1. 预处理（精确移除转发信息块）
     val contentRoot = if (removeForwardedBlock) {
         clone().apply {
-            // 精确匹配转发信息块（包括所有嵌套结构）
             select("""
                 p:has(> b:has(> a:contains(Forwarded From))),
                 p:has(> b:has(> a:contains(转发自)))
@@ -160,41 +154,36 @@ internal suspend fun Element.toRichMessage(
         this
     }
 
-    // 2. 使用原始节点处理逻辑（确保图片等功能正常）
-    val builder = MessageChainBuilder()
-    val nodeVisitor = object : NodeVisitor {
-        override fun head(node: Node, depth: Int) {
+    return MessageChainBuilder().apply {
+        suspend fun processNode(node: Node) {
             when (node) {
                 is TextNode -> {
                     val text = node.wholeText
                         .trimIndent()
                         .replace(Regex("""\s+"""), " ")
                     if (text.isNotBlank()) {
-                        builder.append(text.toPlainText())
+                        append(text.toPlainText())
                     }
                 }
                 is Element -> when (node.nodeName()) {
                     "img" -> try {
-                        builder.append(node.image(subject)) // 保持原始图片上传逻辑
+                        append(node.image(subject))
                     } catch (e: Exception) {
                         logger.warning({ "图片上传失败: ${node.attr("src")}" }, e)
-                        builder.append("[图片]".toPlainText())
+                        append("[图片]".toPlainText())
                     }
-                    "br" -> builder.append("\n".toPlainText())
-                    "a" -> node.text().takeIf { it.isNotBlank() }?.let {
-                        builder.append(it.toPlainText())
-                    }
+                    "br" -> append("\n".toPlainText())
                 }
             }
         }
-        override fun tail(node: Node, depth: Int) = Unit
-    }
-    NodeTraversor.traverse(nodeVisitor, contentRoot)
 
-    return builder.build()
+        contentRoot.childNodes().forEach { node ->
+            processNode(node)
+        }
+    }.build()
 }
 
-// region 改进的辅助函数
+// region 辅助函数
 private fun Element.extractCleanForwardedSource(): String? {
     return select("""
         p > b > a:contains(Forwarded From),
@@ -202,9 +191,17 @@ private fun Element.extractCleanForwardedSource(): String? {
     """.trimIndent())
         .firstOrNull()
         ?.text()
-        ?.replace(Regex("""\s+"""), " ") // 合并多余空格
+        ?.replace(Regex("""\s+"""), " ")
         ?.trim()
         ?.takeIf { it.isNotBlank() }
+}
+
+private fun extractForwardedFromText(text: String): String? {
+    return Regex("""(?:Forwarded From|转发自)[:\s]*([^\n]+)""", RegexOption.IGNORE_CASE)
+        .find(text)
+        ?.groupValues
+        ?.get(1)
+        ?.trim()
 }
 
 private fun String.removeForwardedDeclaration(): String {
