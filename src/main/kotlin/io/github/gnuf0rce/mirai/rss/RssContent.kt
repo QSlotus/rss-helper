@@ -95,24 +95,24 @@ internal fun MessageChainBuilder.appendKeyValue(key: String, value: Any?) {
 
 @PublishedApi
 internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: Boolean): Message {
-    // 1. 提取转发来源（仅提取名称部分）
+    // 1. 提取转发来源
     val forwardedSource = html?.extractForwardedSourceNameOnly()
 
-    // 2. 处理正文内容（不再移除任何块，仅做格式化）
-    val messageContent = html?.toRichMessageKeepAll(subject) 
-        ?: text.orEmpty().toPlainText()
-
-    // 3. 构建消息结构
-    val messageBuilder = buildMessageChain {
-        // 3.1 添加格式化转发来源（如果存在）
-        forwardedSource?.let { 
-            append("【Forwarded From $it】\n".toPlainText()) 
+    // 2. 处理正文内容（使用深度遍历确保不丢失任何内容）
+    val messageContent = html?.let {
+        buildMessageChain {
+            // 先添加转发信息（如果存在）
+            forwardedSource?.let { source ->
+                append("【Forwarded From $source】\n".toPlainText())
+            }
+            // 添加完整HTML内容
+            append(it.toCompleteMessage(subject))
         }
+    } ?: text.orEmpty().toPlainText()
 
-        // 3.2 添加完整正文内容
+    // 3. 构建最终消息
+    val messageBuilder = buildMessageChain {
         append(messageContent)
-
-        // 3.3 添加底部信息
         append("\n------\n".toPlainText())
         append("源URL: ${link ?: "无"}\n".toPlainText())
         append("发布时间: ${published ?: "未知"}".toPlainText())
@@ -129,19 +129,21 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
 }
 
 @PublishedApi
-internal suspend fun Element.toRichMessageKeepAll(subject: Contact): MessageChain {
+internal suspend fun Element.toCompleteMessage(subject: Contact): MessageChain {
     val builder = MessageChainBuilder()
     
-    // 遍历所有子节点但不移除任何内容
-    childNodes().forEach { node ->
+    fun processNode(node: Node) {
         when (node) {
             is TextNode -> {
-                node.wholeText
+                // 处理纯文本中的URL（移除）
+                val text = node.text()
+                    .replace(Regex("""https?://\S+"""), "")
                     .trim()
-                    .takeIf { it.isNotBlank() }
-                    ?.let { builder.append(it.toPlainText()) }
+                if (text.isNotBlank()) {
+                    builder.append(text.toPlainText())
+                }
             }
-            is Element -> when (node.nodeName()) {
+            is Element -> when (node.tagName()) {
                 "img" -> try {
                     builder.append(node.image(subject))
                 } catch (e: Exception) {
@@ -150,23 +152,26 @@ internal suspend fun Element.toRichMessageKeepAll(subject: Contact): MessageChai
                 }
                 "br" -> builder.append("\n".toPlainText())
                 "a" -> {
-                    // 保留链接文本但移除URL
-                    val text = node.text().takeIf { it.isNotBlank() } 
-                        ?: node.attr("href")
-                    builder.append(text.toPlainText())
+                    // 只保留链接文本，移除URL和<a>标签
+                    val linkText = node.text().trim()
+                    if (linkText.isNotBlank()) {
+                        builder.append(linkText.toPlainText())
+                    }
                 }
-                "b", "strong" -> {
-                    // 保留加粗文本
-                    builder.append(node.text().toPlainText())
+                "b", "strong", "p" -> {
+                    // 处理嵌套内容
+                    node.childNodes().forEach { processNode(it) }
                 }
+                else -> node.childNodes().forEach { processNode(it) }
             }
         }
     }
-    
+
+    childNodes().forEach { processNode(it) }
     return builder.build()
 }
 
-// region 辅助函数
+// 辅助函数保持不变
 private fun Element.extractForwardedSourceNameOnly(): String? {
     return select("""
         p:contains(Forwarded From) a,
