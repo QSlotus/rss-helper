@@ -104,6 +104,7 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
         text.orEmpty()
             .removeUrlsFromText()
             .toPlainText()
+            .replaceFirst(forwardedSource.orEmpty(), "") // 删除正文中的转发来源
 
     // 3. 构建消息结构
     val messageBuilder = buildMessageChain {
