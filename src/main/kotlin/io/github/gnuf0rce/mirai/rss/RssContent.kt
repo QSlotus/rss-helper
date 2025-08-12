@@ -119,8 +119,17 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
 
         // 3.2 添加底部信息
         append("\n------\n".toPlainText())
-        append("源URL: ${link ?: "无"}\n".toPlainText())
-        append("发布时间: ${published ?: "未知"}".toPlainText())
+        val source = link?.let {
+            java.net.URL(it).path
+                .removePrefix("/")          // /yhxixinxi/73 → yhxixinxi/73
+                .substringBefore("/")       // yhxixinxi/73  → yhxixinxi
+        } ?: "无"
+        append("消息来源：【$source】\n".toPlainText())
+        val timeFmt = published?.let {
+            java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+                .format(it)
+        } ?: "未知"
+        append("发布时间: $timeFmt".toPlainText())
         forwardedSource?.let {
             append("\n从 $it 转发".toPlainText())
         }
