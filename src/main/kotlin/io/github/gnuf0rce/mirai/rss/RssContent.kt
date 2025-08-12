@@ -100,11 +100,17 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
         ?: text.orEmpty().extractForwardedFromText()
 
     // 2. 处理正文内容（彻底移除转发声明）
-    val messageContent = html?.let {
-        it.toCleanMessage(subject, removeForwarded = true)
-    } ?: text.orEmpty()
-        .removeForwardedDeclaration()
-        .toPlainText()
+    val rawHtml = html
+    val messageContent = if (rawHtml != null) {
+        rawHtml.toCleanMessage(subject, removeForwarded = true)
+    } else {
+        // 把 entry.links 里被拆走的 https 链接拼回来
+        val sb = StringBuilder(text.orEmpty().removeForwardedDeclaration())
+        links.takeIf { it.isNotEmpty() }?.forEach { link ->
+            if (link.href !in sb) sb.append('\n').append(link.href)
+        }
+        sb.toString().toPlainText()
+    }
 
     // 3. 构建消息
     val messageBuilder = buildMessageChain {
