@@ -133,6 +133,13 @@ internal suspend fun SyndEntry.toMessage(subject: Contact, limit: Int, forward: 
         forwardedSource?.let {
             append("\n从 $it 转发".toPlainText())
         }
+        // 消息附件（非图片 enclosure）
+        enclosures
+            .filterNot { it.type?.startsWith("image/") == true }
+            .firstOrNull()
+            ?.url
+            ?.takeIf { it.isNotBlank() }
+            ?.let { append("\n消息附件：$it".toPlainText()) }
     }
 
     return if (forward) {
